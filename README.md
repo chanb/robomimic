@@ -1,3 +1,7 @@
+# Offline-to-online Reinforcement Learning for Image-based Grasping with Scarce Demonstrations
+We build upon the CQL implementation in the `robomimic` codebase.
+To enable SimplifiedQ, set e.g., `algo.critic.ntk_weight = 0.1` which will automatically disable the target network and uses our proposed regularizer.
+
 # robomimic
 
 <p align="center">
