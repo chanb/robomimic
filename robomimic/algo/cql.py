@@ -66,6 +66,9 @@ class CQL(PolicyAlgo, ValueAlgo):
         self.min_q_weight = self.algo_config.critic.min_q_weight
         self.target_q_gap = self.algo_config.critic.target_q_gap if self.automatic_cql_tuning else 0.0
 
+        # NTK settings
+        self.ntk_weight = self.algo_config.critic.ntk_weight
+
     @property
     def log_entropy_weight(self):
         return self.nets["log_entropy_weight"]() if self.automatic_entropy_tuning else\
@@ -308,6 +311,12 @@ class CQL(PolicyAlgo, ValueAlgo):
             self.automatic_entropy_tuning else entropy_weight_loss
         info["actor/loss"] = policy_loss
 
+        for act_dim in range(actions.shape[-1]):
+            info[f"actor/act{act_dim+1}_mean_max"] = dist.base_dist.base_dist.loc[:, act_dim].max().item()
+            info[f"actor/act{act_dim+1}_mean_min"] = dist.base_dist.base_dist.loc[:, act_dim].min().item()
+            info[f"actor/act{act_dim+1}_mean_mean"] = dist.base_dist.base_dist.loc[:, act_dim].mean().item()
+            info[f"actor/act{act_dim+1}_std_max"] = dist.base_dist.base_dist.scale[:, act_dim].max().item()
+
         # Take a training step if we're not validating
         if not validate:
             # Update batch step
@@ -397,16 +406,23 @@ class CQL(PolicyAlgo, ValueAlgo):
 
         # Don't capture gradients here, since the critic target network doesn't get trained (only soft updated)
         with torch.no_grad():
+            critic_key = "critic" if self.ntk_weight > 0.0 else "critic_target"
             # We take the max over all samples if the number of action samples is > 1
             if self.algo_config.critic.num_action_samples > 1:
                 # Generate the target q values, using the backup from the next state
                 temp_actions = next_dist.rsample(sample_shape=(self.algo_config.critic.num_action_samples,)).permute(1, 0, 2)
                 target_qs = [self._get_qs_from_actions(
                     obs_dict=batch["next_obs"], actions=temp_actions, goal_dict=batch["goal_obs"], q_net=critic)
-                                 .max(dim=1, keepdim=True)[0] for critic in self.nets["critic_target"]]
+                                    .max(dim=1, keepdim=True)[0] for critic in self.nets[critic_key]]
             else:
                 target_qs = [critic(obs_dict=batch["next_obs"], acts=next_actions, goal_dict=batch["goal_obs"])
-                             for critic in self.nets["critic_target"]]
+                                for critic in self.nets[critic_key]]
+
+            for i, target_q in enumerate(target_qs):
+                info[f"critic/critic{i+1}_next_q_max"] = torch.max(target_q)
+                info[f"critic/critic{i+1}_next_q_min"] = torch.min(target_q)
+                info[f"critic/critic{i+1}_next_q_mean"] = torch.mean(target_q)
+
             # Take the minimum over all critics
             target_qs, _ = torch.cat(target_qs, dim=1).min(dim=1, keepdim=True)
             # If only sampled once from each critic and not using a deterministic backup, subtract the logprob as well
@@ -439,22 +455,53 @@ class CQL(PolicyAlgo, ValueAlgo):
             ], dim=1)           # shape (B, 3 * N)
             q_cats.append(q_cat)
 
+        # NTK 
+        if self.ntk_weight > 0.0:
+            _, next_latents = zip(*[critic.get_latent(obs_dict=batch["next_obs"], acts=next_actions, goal_dict=batch["goal_obs"])
+                                    for critic in self.nets["critic"]])
+            _, random_latents = zip(*[critic.get_latent(obs_dict=batch["obs"], acts=cql_random_actions[0], goal_dict=batch["goal_obs"])
+                                    for critic in self.nets["critic"]])
+
+            eye = torch.eye(B * 2, device=self.device)
+            q_ntks = []
+            for i, (next_latent, random_latent) in enumerate(zip(next_latents, random_latents)):
+                all_latent = torch.cat([next_latent, random_latent], axis=0)
+                q_ntk = (1 - eye) * (all_latent @ all_latent.T) ** 2
+                q_ntks.append(torch.mean(q_ntk))
+                info[f"critic/critic{i+1}_ntk_mean"] = torch.mean(q_ntk)
+                info[f"critic/critic{i+1}_ntk_max"] = torch.max(q_ntk)
+                info[f"critic/critic{i+1}_ntk_min"] = torch.min(q_ntk)
+        else:
+            q_ntks = []
+            for i in range(len(self.nets["critic"])):
+                info[f"critic/critic{i+1}_ntk_mean"] = torch.tensor(0.0, device=self.device)
+                info[f"critic/critic{i+1}_ntk_max"] = torch.tensor(0.0, device=self.device)
+                info[f"critic/critic{i+1}_ntk_min"] = torch.tensor(0.0, device=self.device)
+                q_ntks.append(torch.tensor(0.0, device=self.device))
+
         # Calculate the losses for all critics
         cql_losses = []
         critic_losses = []
+        ntk_losses = []
         cql_weight = torch.clamp(self.log_cql_weight.exp(), min=0.0, max=1000000.0)
         info["critic/cql_weight"] = cql_weight.item()
-        for i, (q_pred, q_cat) in enumerate(zip(q_preds, q_cats)):
+        for i, (q_pred, q_cat, q_ntk) in enumerate(zip(q_preds, q_cats, q_ntks)):
             # Calculate td error loss
             td_loss = self.td_loss_fcn(q_pred, q_target)
             # Calculate cql loss
             cql_loss = cql_weight * (self.min_q_weight * (torch.logsumexp(q_cat, dim=1).mean() - q_pred.mean()) -
                                      self.target_q_gap)
             cql_losses.append(cql_loss)
+            # Calculate ntk loss
+            ntk_loss = self.ntk_weight * q_ntk
+            ntk_losses.append(ntk_loss)
             # Calculate total loss
-            loss = td_loss + cql_loss
+            loss = td_loss + cql_loss + ntk_loss
             critic_losses.append(loss)
             info[f"critic/critic{i+1}_loss"] = loss
+            info[f"critic/critic{i+1}_curr_q_max"] = torch.max(q_pred)
+            info[f"critic/critic{i+1}_curr_q_min"] = torch.min(q_pred)
+            info[f"critic/critic{i+1}_curr_q_mean"] = torch.mean(q_pred)
 
         # Run gradient descent if we're not validating
         if not validate:
@@ -509,6 +556,35 @@ class CQL(PolicyAlgo, ValueAlgo):
             log_prob = dist.log_prob(actions)
 
         return actions, log_prob
+
+    @staticmethod
+    def _get_qs_latent_from_actions(obs_dict, actions, goal_dict, q_net):
+        """
+        Helper function for grabbing Q values given a single state and multiple (N) sampled actions.
+
+        Args:
+            obs_dict (dict): Observation dict from batch
+            actions (tensor): Torch tensor, with dim1 assumed to be the extra sampled dimension
+            goal_dict (dict): Goal dict from batch
+            q_net (nn.Module): Q net to pass the observations and actions
+
+        Returns:
+            tensor: (B, N) corresponding Q values
+        """
+        # Get the number of sampled actions
+        B, N, D = actions.shape
+
+        # Repeat obs and goals in the batch dimension
+        obs_dict_stacked = ObsUtils.repeat_and_stack_observation(obs_dict, N)
+        goal_dict_stacked = ObsUtils.repeat_and_stack_observation(goal_dict, N)
+
+        # Pass the obs and (flattened) actions through to get the Q values
+        qs, latents = q_net.get_latent(obs_dict=obs_dict_stacked, acts=actions.reshape(-1, D), goal_dict=goal_dict_stacked)
+
+        # Unflatten output
+        qs = qs.reshape(B, N)
+
+        return qs, latents
 
     @staticmethod
     def _get_qs_from_actions(obs_dict, actions, goal_dict, q_net):
@@ -588,6 +664,15 @@ class CQL(PolicyAlgo, ValueAlgo):
         loss_log["Loss"] = 0.
         for critic_ind in range(len(self.nets["critic"])):
             loss_log["Critic/Critic{}_Loss".format(critic_ind + 1)] = info["critic/critic{}_loss".format(critic_ind + 1)].item()
+            loss_log["Critic/Critic{}_NTKMax".format(critic_ind + 1)] = info["critic/critic{}_ntk_max".format(critic_ind + 1)].item()
+            loss_log["Critic/Critic{}_NTKMin".format(critic_ind + 1)] = info["critic/critic{}_ntk_min".format(critic_ind + 1)].item()
+            loss_log["Critic/Critic{}_NTKMean".format(critic_ind + 1)] = info["critic/critic{}_ntk_mean".format(critic_ind + 1)].item()
+            loss_log["Critic/Critic{}_CurrQMax".format(critic_ind + 1)] = info["critic/critic{}_curr_q_max".format(critic_ind + 1)].item()
+            loss_log["Critic/Critic{}_CurrQMin".format(critic_ind + 1)] = info["critic/critic{}_curr_q_min".format(critic_ind + 1)].item()
+            loss_log["Critic/Critic{}_CurrQMean".format(critic_ind + 1)] = info["critic/critic{}_curr_q_mean".format(critic_ind + 1)].item()
+            loss_log["Critic/Critic{}_NextQMax".format(critic_ind + 1)] = info["critic/critic{}_next_q_max".format(critic_ind + 1)].item()
+            loss_log["Critic/Critic{}_NextQMin".format(critic_ind + 1)] = info["critic/critic{}_next_q_min".format(critic_ind + 1)].item()
+            loss_log["Critic/Critic{}_NextQMean".format(critic_ind + 1)] = info["critic/critic{}_next_q_mean".format(critic_ind + 1)].item()
             if "critic/critic{}_grad_norms".format(critic_ind + 1) in info:
                 loss_log["Critic/Critic{}_Grad_Norms".format(critic_ind + 1)] = info["critic/critic{}_grad_norms".format(critic_ind + 1)]
             loss_log["Loss"] += loss_log["Critic/Critic{}_Loss".format(critic_ind + 1)]
@@ -603,6 +688,13 @@ class CQL(PolicyAlgo, ValueAlgo):
         """
         loss_log = OrderedDict()
         loss_log["Actor/Loss"] = info["actor/loss"].item()
+        
+        for act_dim in range(self.ac_dim):
+            loss_log[f"Actor/Act{act_dim+1}_MeanMax"] = info[f"actor/act{act_dim+1}_mean_max"]
+            loss_log[f"Actor/Act{act_dim+1}_MeanMin"] = info[f"actor/act{act_dim+1}_mean_min"]
+            loss_log[f"Actor/Act{act_dim+1}_MeanMean"] = info[f"actor/act{act_dim+1}_mean_mean"]
+            loss_log[f"Actor/Act{act_dim+1}_StdMax"] = info[f"actor/act{act_dim+1}_std_max"]
+
         if "actor/grad_norms" in info:
             loss_log["Actor/Grad_Norms"] = info["actor/grad_norms"]
         loss_log["Loss"] = loss_log["Actor/Loss"]

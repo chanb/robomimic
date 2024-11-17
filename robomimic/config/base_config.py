@@ -191,7 +191,7 @@ class BaseConfig(Config):
 
 
         ## learning config ##
-        self.train.cuda = True          # use GPU or not
+        self.train.device = "cpu"          # use GPU or not
         self.train.batch_size = 100     # batch size
         self.train.num_epochs = 2000    # number of training epochs
         self.train.seed = 1             # seed for training (for reproducibility)

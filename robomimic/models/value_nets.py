@@ -196,6 +196,21 @@ class ActionValueNetwork(ValueNetwork):
         inputs["action"] = acts
         return super(ActionValueNetwork, self).forward(inputs, goal_dict)
 
+    def get_latent(self, obs_dict, acts, goal_dict=None):
+        """
+        Modify forward from super class to include actions in inputs.
+        """
+        inputs = dict(obs_dict)
+        inputs["action"] = acts
+
+        enc_outputs = self.nets["encoder"](obs=inputs, goal=goal_dict)
+        mlp_out = self.nets["mlp"](enc_outputs)
+        values = self.nets["decoder"](mlp_out)["value"]
+        if self.value_bounds is not None:
+            values = self._value_offset + self._value_scale * torch.tanh(values)
+
+        return values, mlp_out
+
     def _to_string(self):
         return "action_dim={}\nvalue_bounds={}".format(self.ac_dim, self.value_bounds)
 

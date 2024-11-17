@@ -75,6 +75,7 @@ class CQLConfig(BaseConfig):
         self.algo.critic.min_q_weight = 1.0                                 # min q weight (scaling factor) to apply
         self.algo.critic.target_q_gap = 5.0                                 # if set, sets the diff threshold at which Q-values will be penalized more (note: this overrides cql weight above!) Use None or a negative value if not set
         self.algo.critic.num_random_actions = 10                            # Number of random actions to sample when calculating CQL loss
+        self.algo.critic.ntk_weight = 0.1
 
         # critic ensemble parameters (TD3 trick)
         self.algo.critic.ensemble.n = 2                                     # number of Q networks in the ensemble

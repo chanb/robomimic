@@ -567,6 +567,57 @@ def modify_cql_config_for_dataset(config, task_name, dataset_type, hdf5_type):
     return config
 
 
+def modify_cql_ntk_config_for_dataset(config, task_name, dataset_type, hdf5_type):
+    """
+    Modifies a CQLConfig object for training on a particular kind of dataset. This function
+    just sets algorithm hyperparameters in the algo config depending on the kind of 
+    dataset.
+
+    Args:
+        config (CQLConfig instance): config to modify
+
+        task_name (str): identify task that dataset was collected on. Only used to distinguish
+            between simulation and real-world, for an assert statement
+
+        dataset_type (str): dataset type for this dataset (e.g. ph, mh, mg, paired).
+
+        hdf5_type (str): hdf5 type for this dataset (e.g. raw, low_dim, image). 
+    """
+    assert isinstance(config, CQLConfig), "must be CQLConfig"
+    assert config.algo_name == "cql", "must be CQLConfig"
+    assert dataset_type in ["ph", "mh", "mg", "paired"], "invalid dataset type"
+    is_real_dataset = "real" in task_name
+    assert not is_real_dataset, "we only ran BC-RNN on real robot"
+    if not is_real_dataset:
+        assert hdf5_type != "raw", "cannot train on raw demonstrations"
+
+    with config.train.values_unlocked():
+        # CQL uses batch size 1024 (for low-dim) and 8 (for image)
+        if hdf5_type in ["low_dim", "low_dim_sparse", "low_dim_dense"]:
+            config.train.batch_size = 1024
+        else:
+            config.train.batch_size = 8
+
+    with config.algo.values_unlocked():
+        # base parameters that may get modified further
+        config.algo.optim_params.critic.learning_rate.initial = 1e-3                # learning rates
+        config.algo.optim_params.actor.learning_rate.initial = 3e-4
+        config.algo.actor.target_entropy = "default"                                # use automatic entropy tuning to default target value
+        config.algo.critic.deterministic_backup = True                              # deterministic Q-backup
+        config.algo.critic.target_q_gap = 5.0                                       # use Lagrange, with threshold 5.0
+        config.algo.critic.min_q_weight = 1.0
+        config.algo.target_tau = 5e-3                                               # tau 5e-3
+        config.algo.discount = 0.99                                                 # discount 0.99
+        config.algo.critic.layer_dims = (300, 400)                                  # all MLP sizes at (300, 400)
+        config.algo.actor.layer_dims = (300, 400)
+        config.algo.critic.ntk_weight = 0.1
+robomimic/scripts/generate_paper_configs.py
+        if hdf5_type not in ["low_dim", "low_dim_sparse", "low_dim_dense"]:
+            # update policy LR to 1e-4 for image runs
+            config.algo.optim_params.actor.learning_rate.initial = 1e-4
+
+    return config
+
 def modify_hbc_config_for_dataset(config, task_name, dataset_type, hdf5_type):
     """
     Modifies a HBCConfig object for training on a particular kind of dataset. This function
@@ -741,6 +792,7 @@ def generate_experiment_config(
         modifier_for_obs = modify_config_for_default_low_dim_exp
 
     algo_config_name = "bc" if algo_name == "bc_rnn" else algo_name
+    algo_config_name = "cql" if algo_name == "simplified_q" else algo_name
     config = config_factory(algo_name=algo_config_name)
     # turn into default config for observation modalities (e.g.: low-dim or rgb)
     config = modifier_for_obs(config)
@@ -822,15 +874,23 @@ def generate_core_configs(
                     continue
                 
                 # get list of algorithms to generate configs for, for this hdf5 dataset
-                algos_to_generate = ["bc", "bc_rnn", "bcq", "cql", "hbc", "iris"]
-                if hdf5_type not in ["low_dim", "low_dim_sparse", "low_dim_dense"]:
-                    # no hbc or iris for image runs
-                    algos_to_generate = algos_to_generate[:-2]
+                # algos_to_generate = ["bc", "bc_rnn", "bcq", "cql", "hbc", "iris"]
+                # if hdf5_type not in ["low_dim", "low_dim_sparse", "low_dim_dense"]:
+                #     # no hbc or iris for image runs
+                #     algos_to_generate = algos_to_generate[:-2]
+                algos_to_generate = ["bc", "cql", "simplified_q"]
                 if is_real_dataset:
                     # we only ran BC-RNN on real robot
                     algos_to_generate = ["bc_rnn"]
 
+                if is_real_dataset or ("lift" not in task and "can" not in task):
+                    continue
+
+                if "ph" not in dataset_type and "mh" not in dataset_type:
+                    continue
+
                 for algo_name in algos_to_generate:
+                    print(task, dataset_type, hdf5_type, algo_name)
 
                     # generate config for this experiment
                     config, json_path = generate_experiment_config(
@@ -1317,21 +1377,22 @@ if __name__ == "__main__":
     # algo to modifier
     algo_to_modifier = dict(
         bc=modify_bc_config_for_dataset, 
-        bc_rnn=modify_bc_rnn_config_for_dataset,
-        bcq=modify_bcq_config_for_dataset,
+        # bc_rnn=modify_bc_rnn_config_for_dataset,
+        # bcq=modify_bcq_config_for_dataset,
         cql=modify_cql_config_for_dataset,
-        hbc=modify_hbc_config_for_dataset,
-        iris=modify_iris_config_for_dataset,
+        # hbc=modify_hbc_config_for_dataset,
+        # iris=modify_iris_config_for_dataset,
+        simplified_q=modify_cql_ntk_config_for_dataset,
     )
 
     # exp name to config generator
     exp_name_to_generator = dict(
         core=generate_core_configs,
-        subopt=generate_subopt_configs,
-        dataset_size=generate_dataset_size_configs,
-        obs_ablation=generate_obs_ablation_configs,
-        hyper_ablation=generate_hyper_ablation_configs,
-        d4rl=generate_d4rl_configs,
+        # subopt=generate_subopt_configs,
+        # dataset_size=generate_dataset_size_configs,
+        # obs_ablation=generate_obs_ablation_configs,
+        # hyper_ablation=generate_hyper_ablation_configs,
+        # d4rl=generate_d4rl_configs,
     )
 
     # generate configs for each experiment name

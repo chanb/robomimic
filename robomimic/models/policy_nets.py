@@ -33,6 +33,7 @@ class ActorNetwork(MIMO_MLP):
         obs_shapes,
         ac_dim,
         mlp_layer_dims,
+        activation=nn.ReLU,
         goal_shapes=None,
         encoder_kwargs=None,
     ):
@@ -87,6 +88,7 @@ class ActorNetwork(MIMO_MLP):
             input_obs_group_shapes=observation_group_shapes,
             output_shapes=output_shapes,
             layer_dims=mlp_layer_dims,
+            activation=activation,
             encoder_kwargs=encoder_kwargs,
         )
 
@@ -209,6 +211,7 @@ class GaussianActorNetwork(ActorNetwork):
         low_noise_eval=True,
         use_tanh=False,
         goal_shapes=None,
+        activation=nn.ReLU,
         encoder_kwargs=None,
     ):
         """
@@ -299,6 +302,7 @@ class GaussianActorNetwork(ActorNetwork):
             ac_dim=ac_dim,
             mlp_layer_dims=mlp_layer_dims,
             goal_shapes=goal_shapes,
+            activation=activation,
             encoder_kwargs=encoder_kwargs,
         )
 

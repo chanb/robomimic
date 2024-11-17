@@ -86,7 +86,7 @@ def reparameterize(mu, logvar):
     return z
 
 
-def optimizer_from_optim_params(net_optim_params, net):
+def optimizer_from_optim_params(net_optim_params, net, is_critic=False):
     """
     Helper function to return a torch Optimizer from the optim_params 
     section of the config for a particular network.
@@ -109,12 +109,14 @@ def optimizer_from_optim_params(net_optim_params, net):
             params=net.parameters(),
             lr=lr,
             weight_decay=net_optim_params["regularization"]["L2"],
+            betas=(0.5, 0.999) if is_critic else (0.9, 0.999),
         )
     elif optimizer_type == "adamw":
         return optim.AdamW(
             params=net.parameters(),
             lr=lr,
             weight_decay=net_optim_params["regularization"]["L2"],
+            betas=(0.5, 0.999) if is_critic else (0.9, 0.999),
         )
 
 

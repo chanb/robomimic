@@ -42,21 +42,21 @@ from robomimic.algo import algo_factory, RolloutPolicy
 from robomimic.utils.log_utils import PrintLogger, DataLogger, flush_warnings
 
 
-def train(config, device):
+def train(config, device, seed):
     """
     Train a model using the algorithm.
     """
 
     # first set seeds
-    np.random.seed(config.train.seed)
-    torch.manual_seed(config.train.seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
     torch.set_num_threads(2)
 
     print("\n============= New Training Run with Config =============")
     print(config)
     print("")
-    log_dir, ckpt_dir, video_dir = TrainUtils.get_exp_dir(config)
+    log_dir, ckpt_dir, video_dir = TrainUtils.get_exp_dir(config, False)
 
     if config.experiment.logging.terminal_output_to_txt:
         # log stdout and stderr to a text file
@@ -348,7 +348,17 @@ def main(args):
         config.experiment.name = args.name
 
     # get torch device
-    device = TorchUtils.get_torch_device(try_to_use_cuda=config.train.cuda)
+    # device = TorchUtils.get_torch_device(try_to_use_cuda=config.train.cuda)
+    device = args.device
+    seed = args.seed
+
+    config.unlock()
+    config.lock_keys()
+
+    config.train.device = device
+    config.train.seed = seed
+
+    config.lock()
 
     # maybe modify config for debugging purposes
     if args.debug:
@@ -375,7 +385,7 @@ def main(args):
     # catch error during training and print it
     res_str = "finished run successfully!"
     try:
-        train(config, device=device)
+        train(config, device=device, seed=seed)
     except Exception as e:
         res_str = "run failed with error:\n{}\n\n{}".format(e, traceback.format_exc())
     print(res_str)
@@ -421,6 +431,20 @@ if __name__ == "__main__":
         "--debug",
         action='store_true',
         help="set this flag to run a quick training run for debugging purposes"
+    )
+
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        help="(optional) if provided, override the device",
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="(optional) if provided, override the seed in the config",
     )
 
     args = parser.parse_args()

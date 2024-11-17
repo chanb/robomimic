@@ -54,10 +54,10 @@ def get_exp_dir(config, auto_remove_exp_dir=False):
     if not os.path.isabs(base_output_dir):
         # relative paths are specified relative to robomimic module location
         base_output_dir = os.path.join(robomimic.__path__[0], base_output_dir)
-    base_output_dir = os.path.join(base_output_dir, config.experiment.name)
+    base_output_dir = os.path.join(base_output_dir, f"{config.experiment.name}-seed_{config.train.seed}")
     if os.path.exists(base_output_dir):
         if not auto_remove_exp_dir:
-            ans = input("WARNING: model directory ({}) already exists! \noverwrite? (y/n)\n".format(base_output_dir))
+            ans = "n"
         else:
             ans = "y"
         if ans == "y":
